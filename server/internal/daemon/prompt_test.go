@@ -2114,17 +2114,25 @@ func TestBuildPromptAgentIdentityChangedNotice(t *testing.T) {
 		}
 	})
 
-	// A dropped resume already says the earlier turns are gone. Saying "your
-	// identity changed since the previous turn" on top of that contradicts it.
-	t.Run("suppressed when the resume itself was lost", func(t *testing.T) {
-		lost := resumed
-		lost.PriorSessionResumeUnavailable = true
-		out := BuildPrompt(lost, "claude", WithAgentIdentityChanged())
-		if strings.Contains(out, heading) {
-			t.Errorf("identity notice rendered alongside a lost-resume notice:\n%s", out)
+	// MUL-5305: the server withholds a newer session and hands back an OLDER one
+	// that resumes cleanly, flagging the gap. Turns written under the previous
+	// identity ARE replayed here, so this is the case the notice exists for —
+	// gating it on PriorSessionResumeUnavailable would drop it exactly here.
+	t.Run("survives a flagged continuity gap that still resumes", func(t *testing.T) {
+		flagged := resumed
+		flagged.PriorSessionResumeUnavailable = true
+		out := BuildPrompt(flagged, "claude", WithAgentIdentityChanged())
+		if !strings.Contains(out, heading) {
+			t.Fatalf("identity notice dropped on a flagged-but-resuming turn:\n%s", out)
 		}
 		if !strings.Contains(out, "## Session Continuity Notice") {
 			t.Errorf("continuity notice went missing:\n%s", out)
+		}
+		// The two have to be able to stand together: one says some memory did
+		// not come back, the other says which instructions now win. The identity
+		// notice must not assert a history that may be gone.
+		if strings.Contains(out, "Those earlier turns are still an accurate record") {
+			t.Errorf("identity notice asserts a history the continuity notice says is gone:\n%s", out)
 		}
 	})
 }

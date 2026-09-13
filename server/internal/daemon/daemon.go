@@ -6714,6 +6714,14 @@ func sessionHomeReachable(provider string, env *execenv.Environment, envReused b
 // written before the identity section existed, or a task with no identity at
 // all. An unknown prior identity is not evidence of a change, and announcing
 // one that did not happen teaches the agent to distrust the notice.
+//
+// Known gap: local_directory and local-worktree runs excise the managed block
+// on the way out (see the CleanupRuntimeConfig defer in runTask) so Multica
+// leaves nothing behind in the user's own tree. Their next run therefore reads
+// no prior identity and stays silent even when the resume does carry one. That
+// cleanup is worth more than this notice, so the coverage is managed workspaces
+// only; closing the gap needs the identity recorded somewhere the cleanup does
+// not reach, which is a larger change than this one.
 func agentIdentityChangedSincePriorRun(task Task, taskCtx execenv.TaskContextForEnv, provider, workDir string, taskLog *slog.Logger) bool {
 	if task.PriorSessionID == "" {
 		return false

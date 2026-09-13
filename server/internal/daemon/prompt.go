@@ -66,12 +66,18 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 	b.WriteString(buildWorktreeReplayConflictBlock(opts.worktreeReplayConflicts))
 	if task.PriorSessionResumeUnavailable {
 		b.WriteString(sessionContinuityNoticeFor(task))
-	} else if opts.agentIdentityChanged {
-		// Mutually exclusive with the continuity notice by construction: that
-		// one says the earlier turns are GONE, this one says they are still
-		// there but were written under superseded instructions. When the resume
-		// did not survive there is no stale self-description left to correct,
-		// so emitting both would spend a paragraph contradicting the other.
+	}
+	// Deliberately NOT exclusive with the continuity notice above. Under
+	// MUL-5305 the server withholds a newer session and hands back an OLDER one
+	// that resumes cleanly, setting PriorSessionResumeUnavailable while turns
+	// written under the previous identity ARE replayed — the exact case this
+	// notice exists for. Gating it on the flag would drop it there.
+	//
+	// The case where no conversation comes back needs no guard here: the daemon
+	// clears PriorSessionID when it drops a resume, and
+	// agentIdentityChangedSincePriorRun returns false without one, so the option
+	// is never set on a turn that replays nothing.
+	if opts.agentIdentityChanged {
 		b.WriteString(execenv.AgentIdentityChangedNotice)
 	}
 	b.WriteString(execenv.BuildTaskInitiatorBlock(task.InitiatorType, task.InitiatorName, task.InitiatorEmail))

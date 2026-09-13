@@ -540,12 +540,19 @@ const SessionContinuityNoticeUnrecoverable = "## Session Continuity Notice\n\n" 
 // prompt, and quoting a diff of the agent's own instructions back at it spends
 // tokens re-asserting what it can read directly.
 //
+// The clause about the earlier turns is conditional ("where those earlier turns
+// are still in front of you") on purpose. The daemon decides to send this before
+// the provider is launched, but a runtime can still reject the resume mid-run,
+// and the backend then prepends a SessionContinuityNotice to this same turn. The
+// wording has to stay true in that pairing instead of asserting a history that
+// did not come back.
+//
 // Emitted into the per-turn user message for the same reason as the
 // SessionContinuityNotice* family: true of one run and false of the next on the
 // same issue, so rendering it into the brief would break prompt-cache prefix
 // stability across resumes (MUL-5377).
 const AgentIdentityChangedNotice = "## Agent Identity Notice\n\n" +
-	"Your Agent Identity was updated since the previous turn of this conversation. The identity in this message is the authoritative one: follow it wherever it differs from how you described yourself, or from instructions you were acting under, earlier in this conversation. Those earlier turns are still an accurate record of the work — keep the context, the findings and the decisions from them; it is only the instructions that have been superseded. Do not open your reply by announcing this — raise it only where it actually matters, such as when the user asks you to do something the earlier identity allowed and the current one does not.\n\n"
+	"Your Agent Identity was updated since the previous turn of this conversation. The identity in this message is the authoritative one: follow it wherever it differs from how you described yourself, or from instructions you were acting under, earlier in this conversation. Where those earlier turns are still in front of you, they remain an accurate record of the work — keep their context, findings and decisions; it is only the instructions that have been superseded. Do not open your reply by announcing this — raise it only where it actually matters, such as when the user asks you to do something the earlier identity allowed and the current one does not.\n\n"
 
 // writeWorkflowHeader emits the unconditional `### Workflow` heading.
 func writeWorkflowHeader(b *strings.Builder) {
