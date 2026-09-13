@@ -314,6 +314,66 @@ func locateMarkerBlock(content string) (start, end int, found bool) {
 	return start, end, true
 }
 
+// agentIdentityHeading opens the section writeAgentIdentity emits. Both the
+// on-disk copy and the freshly rendered one are sliced at this exact string, so
+// a change to the heading cannot make the two sides disagree.
+const agentIdentityHeading = "## Agent Identity"
+
+// sliceAgentIdentitySection returns the "## Agent Identity" section of a brief
+// body, from its heading up to the next Markdown H2, or "" when the body has no
+// such section.
+//
+// This is deliberately the ONLY place either side of the identity comparison is
+// cut, because the agent's instructions are user-authored and may themselves
+// contain an H2. Such a heading truncates this slice early — but it truncates
+// BOTH sides at the same place, so the comparison stays sound; what it costs is
+// reach, not correctness. An instructions edit entirely below the author's own
+// first H2 compares equal and goes unannounced, which is the honest trade for
+// not trying to parse user Markdown.
+func sliceAgentIdentitySection(body string) string {
+	start := strings.Index(body, agentIdentityHeading)
+	if start < 0 {
+		return ""
+	}
+	rest := body[start+len(agentIdentityHeading):]
+	if next := strings.Index(rest, "\n## "); next >= 0 {
+		return strings.TrimSpace(body[start : start+len(agentIdentityHeading)+next])
+	}
+	return strings.TrimSpace(body[start:])
+}
+
+// AgentIdentitySection renders the Agent Identity section this task context
+// would produce, normalized for comparison against the one already on disk.
+// Returns "" when the context carries no identity at all.
+func AgentIdentitySection(ctx TaskContextForEnv) string {
+	var b strings.Builder
+	writeAgentIdentity(&b, ctx)
+	return sliceAgentIdentitySection(b.String())
+}
+
+// PriorAgentIdentitySection reads the Agent Identity section recorded in the
+// Multica-managed block of the runtime config file a previous run left in
+// workDir. Returns "" when the file is absent, carries no managed block, or the
+// block predates the identity section.
+//
+// Must be called BEFORE InjectRuntimeConfig, which overwrites the block with
+// this run's identity. Reading it afterwards always reports "unchanged".
+func PriorAgentIdentitySection(workDir, provider string) string {
+	path := runtimeConfigPath(workDir, provider)
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	start, end, ok := locateMarkerBlock(string(data))
+	if !ok {
+		return ""
+	}
+	return sliceAgentIdentitySection(string(data)[start:end])
+}
+
 // CleanupRuntimeConfig excises the Multica marker block from the runtime
 // config file for the given provider and restores the file to its exact
 // pre-injection state, byte for byte. The cleanup is the second half of

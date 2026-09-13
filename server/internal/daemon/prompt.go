@@ -66,6 +66,13 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 	b.WriteString(buildWorktreeReplayConflictBlock(opts.worktreeReplayConflicts))
 	if task.PriorSessionResumeUnavailable {
 		b.WriteString(sessionContinuityNoticeFor(task))
+	} else if opts.agentIdentityChanged {
+		// Mutually exclusive with the continuity notice by construction: that
+		// one says the earlier turns are GONE, this one says they are still
+		// there but were written under superseded instructions. When the resume
+		// did not survive there is no stale self-description left to correct,
+		// so emitting both would spend a paragraph contradicting the other.
+		b.WriteString(execenv.AgentIdentityChangedNotice)
 	}
 	b.WriteString(execenv.BuildTaskInitiatorBlock(task.InitiatorType, task.InitiatorName, task.InitiatorEmail))
 	b.WriteString(execenv.BuildConnectedAppsBlock(task.ConnectedApps))
@@ -78,6 +85,7 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 type promptOpts struct {
 	sharedLocalDirectory    bool
 	worktreeReplayConflicts []string
+	agentIdentityChanged    bool
 }
 
 // PromptOption tunes per-turn prompt copy with run-scoped context.
@@ -101,6 +109,15 @@ func WithSharedLocalDirectory() PromptOption {
 // resolves it (MUL-6881).
 func WithWorktreeReplayConflicts(files []string) PromptOption {
 	return func(o *promptOpts) { o.worktreeReplayConflicts = files }
+}
+
+// WithAgentIdentityChanged marks a resumed turn whose agent identity section
+// differs from the one the previous turn ran under — a rename, an instructions
+// edit, or both. Only the daemon can tell: the comparison is against the brief
+// the last run left in the workdir, and it is destroyed by this run's own
+// InjectRuntimeConfig moments later (#5736, #5909).
+func WithAgentIdentityChanged() PromptOption {
+	return func(o *promptOpts) { o.agentIdentityChanged = true }
 }
 
 // buildSharedLocalDirectoryBlock warns an unlocked turn that its working

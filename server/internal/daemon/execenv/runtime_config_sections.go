@@ -520,6 +520,33 @@ const SessionContinuityNoticeChatTranscript = "## Session Continuity Notice\n\n"
 const SessionContinuityNoticeUnrecoverable = "## Session Continuity Notice\n\n" +
 	"This run was meant to continue an earlier conversation, but that session's context could NOT be restored — you are starting fresh with no memory of the previous turns. That history is not readable from anywhere now: there is no command that fetches it, and only the context already in this message survives. **When you reply, tell the user up front (one short sentence) that the previous conversation context was unavailable and this is a new session**, so they understand why the thread did not carry over.\n\n"
 
+// AgentIdentityChangedNotice tells a RESUMED agent that its own identity
+// section changed between the previous turn and this one.
+//
+// The conflict it resolves is specific: on a resume the provider replays the
+// earlier conversation, in which the agent introduced itself and reasoned under
+// the OLD brief, while the runtime config file on disk has already been
+// rewritten with the new one. Both are in front of the agent at once and
+// nothing says which is current, so the agent can keep acting as who it used to
+// be — the replayed turns are far longer than the brief and read as lived
+// history.
+//
+// Deliberately NOT a dropped session (#5736, #5909). Discarding the thread
+// would resolve the conflict by destroying the conversation, and it would have
+// to be done on every instructions edit — a routine action — to be consistent.
+// A sentence costs one paragraph and keeps the thread.
+//
+// It does not restate what changed. The new brief is already in this same
+// prompt, and quoting a diff of the agent's own instructions back at it spends
+// tokens re-asserting what it can read directly.
+//
+// Emitted into the per-turn user message for the same reason as the
+// SessionContinuityNotice* family: true of one run and false of the next on the
+// same issue, so rendering it into the brief would break prompt-cache prefix
+// stability across resumes (MUL-5377).
+const AgentIdentityChangedNotice = "## Agent Identity Notice\n\n" +
+	"Your Agent Identity was updated since the previous turn of this conversation. The identity in this message is the authoritative one: follow it wherever it differs from how you described yourself, or from instructions you were acting under, earlier in this conversation. Those earlier turns are still an accurate record of the work — keep the context, the findings and the decisions from them; it is only the instructions that have been superseded. Do not open your reply by announcing this — raise it only where it actually matters, such as when the user asks you to do something the earlier identity allowed and the current one does not.\n\n"
+
 // writeWorkflowHeader emits the unconditional `### Workflow` heading.
 func writeWorkflowHeader(b *strings.Builder) {
 	b.WriteString("### Workflow\n\n")

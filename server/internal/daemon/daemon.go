@@ -6696,6 +6696,44 @@ func sessionHomeReachable(provider string, env *execenv.Environment, envReused b
 	return envReused
 }
 
+// agentIdentityChangedSincePriorRun reports whether the agent's identity
+// section differs from the one the previous run left in workDir — the agent was
+// renamed, its instructions were edited, or both.
+//
+// Unlike the gates around it this changes NOTHING about the resume: the session
+// is kept and the conversation continues. All it does is decide whether this
+// turn carries AgentIdentityChangedNotice, because on a resume the replayed
+// conversation (written under the old identity) and the freshly injected brief
+// are both in front of the agent with nothing to say which one is current
+// (#5736, #5909).
+//
+// Must run BEFORE InjectRuntimeConfig: the comparison reads the prior run's
+// brief off disk, and the injection is what overwrites it.
+//
+// Returns false whenever either side is unknown — a fresh workdir, a brief
+// written before the identity section existed, or a task with no identity at
+// all. An unknown prior identity is not evidence of a change, and announcing
+// one that did not happen teaches the agent to distrust the notice.
+func agentIdentityChangedSincePriorRun(task Task, taskCtx execenv.TaskContextForEnv, provider, workDir string, taskLog *slog.Logger) bool {
+	if task.PriorSessionID == "" {
+		return false
+	}
+	current := execenv.AgentIdentitySection(taskCtx)
+	if current == "" {
+		return false
+	}
+	prior := execenv.PriorAgentIdentitySection(workDir, provider)
+	if prior == "" || prior == current {
+		return false
+	}
+	taskLog.Info("agent identity changed since the prior run; notifying the resumed session",
+		"session_id", task.PriorSessionID,
+		"agent_id", task.AgentID,
+		"agent_name", taskCtx.AgentName,
+	)
+	return true
+}
+
 // shouldReusePriorWorkdir keeps the local_directory lock and cross-agent
 // isolation invariants without forcing managed follow-ups onto a fresh
 // provider session. Every managed issue or chat task may reuse only directories
@@ -8319,6 +8357,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if resumeReachable {
 		gateCodexResumeToRolloutPresence(&task, &taskCtx, provider, env.CodexHome, taskLog)
 	}
+	// Read the prior run's identity while its brief is still on disk — the
+	// injection below replaces it with this run's. Only meaningful for a resume,
+	// which the gates above have now finished deciding.
+	identityChanged := agentIdentityChangedSincePriorRun(task, taskCtx, provider, env.WorkDir, taskLog)
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
 	runtimeBrief, err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
@@ -8339,6 +8381,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// prompt has to be the thing that tells it (MUL-6881).
 	if env.LocalWorktree != nil && len(env.LocalWorktree.ReplayConflicts) > 0 {
 		promptOptions = append(promptOptions, WithWorktreeReplayConflicts(env.LocalWorktree.ReplayConflicts))
+	}
+	if identityChanged {
+		promptOptions = append(promptOptions, WithAgentIdentityChanged())
 	}
 	prompt := BuildPrompt(task, provider, promptOptions...)
 
