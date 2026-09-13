@@ -337,9 +337,16 @@ func sliceAgentIdentitySection(body string) string {
 	}
 	rest := body[start+len(agentIdentityHeading):]
 	if next := strings.Index(rest, "\n## "); next >= 0 {
-		return strings.TrimSpace(body[start : start+len(agentIdentityHeading)+next])
+		rest = rest[:next]
 	}
-	return strings.TrimSpace(body[start:])
+	// A heading with nothing under it records no identity — writeAgentIdentity
+	// emits exactly that for a task carrying an AgentID but neither a name nor
+	// instructions. Normalising it to "" on BOTH sides is what stops an unknown
+	// identity being compared against a known one and reported as a change.
+	if strings.TrimSpace(rest) == "" {
+		return ""
+	}
+	return strings.TrimSpace(agentIdentityHeading + rest)
 }
 
 // AgentIdentitySection renders the Agent Identity section this task context

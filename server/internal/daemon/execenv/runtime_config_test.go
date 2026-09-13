@@ -2390,3 +2390,120 @@ func TestEveryBriefThatTeachesJSONOutputAlsoWarnsAgainstMergingStderr(t *testing
 		}
 	}
 }
+
+// TestAgentIdentitySectionRoundTrip pins the comparison the resume notice is
+// built on: what InjectRuntimeConfig writes for an identity must read back as
+// exactly what AgentIdentitySection renders for that same identity. If the two
+// ever drift apart, agentIdentityChangedSincePriorRun reports a change on every
+// single resume, and the notice becomes noise the agent learns to ignore.
+func TestAgentIdentitySectionRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	base := TaskContextForEnv{
+		IssueID:           "00000000-0000-0000-0000-000000000001",
+		AgentID:           "de53a53c-3d5e-4829-bf82-10dd35ce4858",
+		AgentName:         "Reviewer",
+		AgentInstructions: "Review code. Never push.",
+	}
+
+	t.Run("written identity reads back identical", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
+			t.Fatalf("InjectRuntimeConfig: %v", err)
+		}
+		prior := PriorAgentIdentitySection(dir, "claude")
+		if prior == "" {
+			t.Fatal("prior identity section came back empty after injection")
+		}
+		if got := AgentIdentitySection(base); got != prior {
+			t.Fatalf("round trip mismatch:\non disk:  %q\nrendered: %q", prior, got)
+		}
+	})
+
+	t.Run("rename is visible", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
+			t.Fatalf("InjectRuntimeConfig: %v", err)
+		}
+		renamed := base
+		renamed.AgentName = "Release Manager"
+		if AgentIdentitySection(renamed) == PriorAgentIdentitySection(dir, "claude") {
+			t.Fatal("a rename compared equal to the identity on disk")
+		}
+	})
+
+	// The half #5909's name comparison could not see, and the reason the notice
+	// replaced it: operators edit instructions far more often than they rename.
+	t.Run("instructions edit is visible", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
+			t.Fatalf("InjectRuntimeConfig: %v", err)
+		}
+		edited := base
+		edited.AgentInstructions = "Review code. You may now push to feature branches."
+		if AgentIdentitySection(edited) == PriorAgentIdentitySection(dir, "claude") {
+			t.Fatal("an instructions edit compared equal to the identity on disk")
+		}
+	})
+
+	// A second run of the SAME agent on a DIFFERENT issue must compare equal —
+	// otherwise every follow-up in a reused workdir would announce a change.
+	t.Run("different issue same identity compares equal", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
+			t.Fatalf("InjectRuntimeConfig: %v", err)
+		}
+		next := base
+		next.IssueID = "00000000-0000-0000-0000-000000000002"
+		if got, prior := AgentIdentitySection(next), PriorAgentIdentitySection(dir, "claude"); got != prior {
+			t.Fatalf("same identity on a new issue compared unequal:\non disk:  %q\nrendered: %q", prior, got)
+		}
+	})
+
+	// Instructions are user-authored Markdown and may carry their own H2. Both
+	// sides are sliced by the same rule, so the comparison must still hold.
+	t.Run("instructions containing their own H2 round-trip", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		withH2 := base
+		withH2.AgentInstructions = "Review code.\n\n## House rules\n\nNever push."
+		if _, err := InjectRuntimeConfig(dir, "claude", withH2); err != nil {
+			t.Fatalf("InjectRuntimeConfig: %v", err)
+		}
+		if got, prior := AgentIdentitySection(withH2), PriorAgentIdentitySection(dir, "claude"); got != prior {
+			t.Fatalf("instructions with an H2 did not round-trip:\non disk:  %q\nrendered: %q", prior, got)
+		}
+		renamed := withH2
+		renamed.AgentName = "Release Manager"
+		if AgentIdentitySection(renamed) == PriorAgentIdentitySection(dir, "claude") {
+			t.Fatal("a rename went unnoticed because the instructions carried an H2")
+		}
+	})
+
+	t.Run("absent and unmanaged files report nothing", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if got := PriorAgentIdentitySection(dir, "claude"); got != "" {
+			t.Fatalf("fresh workdir: got %q, want empty", got)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Mine\n\n## Agent Identity\n\n**You are: Someone Else**\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// User-authored content outside any managed block must never be read as
+		// a prior Multica identity.
+		if got := PriorAgentIdentitySection(dir, "claude"); got != "" {
+			t.Fatalf("unmanaged file: got %q, want empty", got)
+		}
+	})
+
+	t.Run("no identity renders nothing", func(t *testing.T) {
+		t.Parallel()
+		if got := AgentIdentitySection(TaskContextForEnv{IssueID: "x"}); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+}

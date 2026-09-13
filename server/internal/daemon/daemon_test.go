@@ -6101,3 +6101,104 @@ func TestHermesProfileChainCoversLaunchPrefix(t *testing.T) {
 		t.Errorf("custom = %v, want only the selector removed", strippedCustom)
 	}
 }
+
+// TestAgentIdentityChangedSincePriorRun covers the decision behind the resume
+// identity notice. The rule it has to get right in both directions: announce a
+// real change, and stay silent on everything else — a false positive trains the
+// agent to ignore the notice, and it fires on ordinary follow-ups.
+func TestAgentIdentityChangedSincePriorRun(t *testing.T) {
+	t.Parallel()
+
+	priorRun := func(t *testing.T, name, instructions string) string {
+		t.Helper()
+		dir := t.TempDir()
+		ctx := execenv.TaskContextForEnv{
+			IssueID:           "00000000-0000-0000-0000-000000000001",
+			AgentID:           "de53a53c-3d5e-4829-bf82-10dd35ce4858",
+			AgentName:         name,
+			AgentInstructions: instructions,
+		}
+		if _, err := execenv.InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+			t.Fatalf("seed prior run: %v", err)
+		}
+		return dir
+	}
+	now := func(name, instructions string) execenv.TaskContextForEnv {
+		return execenv.TaskContextForEnv{
+			IssueID:           "00000000-0000-0000-0000-000000000002",
+			AgentID:           "de53a53c-3d5e-4829-bf82-10dd35ce4858",
+			AgentName:         name,
+			AgentInstructions: instructions,
+		}
+	}
+	resuming := Task{PriorSessionID: "sess-1", AgentID: "de53a53c-3d5e-4829-bf82-10dd35ce4858"}
+
+	tests := []struct {
+		name         string
+		priorName    string
+		priorInstr   string
+		task         Task
+		currentName  string
+		currentInstr string
+		want         bool
+	}{
+		{
+			name:      "rename announces",
+			priorName: "Reviewer", priorInstr: "Review code.",
+			task:        resuming,
+			currentName: "Release Manager", currentInstr: "Review code.",
+			want: true,
+		},
+		{
+			// #5909's name check could not see this one, and it is the common case.
+			name:      "instructions edit announces",
+			priorName: "Reviewer", priorInstr: "Review code. Never push.",
+			task:        resuming,
+			currentName: "Reviewer", currentInstr: "Review code. You may push to feature branches.",
+			want: true,
+		},
+		{
+			name:      "unchanged identity stays silent",
+			priorName: "Reviewer", priorInstr: "Review code.",
+			task:        resuming,
+			currentName: "Reviewer", currentInstr: "Review code.",
+			want: false,
+		},
+		{
+			// Not a resume: there is no replayed conversation to correct.
+			name:      "fresh session stays silent",
+			priorName: "Reviewer", priorInstr: "Review code.",
+			task:        Task{AgentID: "de53a53c-3d5e-4829-bf82-10dd35ce4858"},
+			currentName: "Release Manager", currentInstr: "Rewritten.",
+			want: false,
+		},
+		{
+			name:      "unknown current identity stays silent",
+			priorName: "Reviewer", priorInstr: "Review code.",
+			task:        resuming,
+			currentName: "", currentInstr: "",
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := priorRun(t, tc.priorName, tc.priorInstr)
+			got := agentIdentityChangedSincePriorRun(
+				tc.task, now(tc.currentName, tc.currentInstr), "claude", dir, slog.Default())
+			if got != tc.want {
+				t.Fatalf("agentIdentityChangedSincePriorRun = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// A workdir no prior run ever wrote to carries no identity to compare
+	// against. Absence of evidence must not be reported as a change.
+	t.Run("fresh workdir stays silent", func(t *testing.T) {
+		t.Parallel()
+		if agentIdentityChangedSincePriorRun(resuming, now("Reviewer", "Review code."), "claude", t.TempDir(), slog.Default()) {
+			t.Fatal("an unwritten workdir was reported as an identity change")
+		}
+	})
+}
