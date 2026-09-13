@@ -2071,3 +2071,60 @@ func TestWorktreeReplayConflictBlock(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildPromptAgentIdentityChangedNotice pins where the identity notice is
+// rendered and, more importantly, where it is NOT. It belongs in the per-turn
+// message, never in the runtime brief: it is true of one run and false of the
+// next on the same issue, and the brief is the cached prefix (MUL-5377).
+func TestBuildPromptAgentIdentityChangedNotice(t *testing.T) {
+	const heading = "## Agent Identity Notice"
+
+	resumed := Task{
+		IssueID:               "issue-identity-1",
+		TriggerCommentID:      "trigger-1",
+		TriggerCommentContent: "carry on",
+		TriggerAuthorType:     "member",
+		PriorSessionID:        "session-123",
+		NewCommentsDeltaKnown: true,
+	}
+
+	t.Run("absent without the option", func(t *testing.T) {
+		if out := BuildPrompt(resumed, "claude"); strings.Contains(out, heading) {
+			t.Errorf("identity notice rendered on a turn that did not ask for it:\n%s", out)
+		}
+	})
+
+	t.Run("present with the option", func(t *testing.T) {
+		out := BuildPrompt(resumed, "claude", WithAgentIdentityChanged())
+		if !strings.Contains(out, heading) {
+			t.Fatalf("identity notice missing from the per-turn message:\n%s", out)
+		}
+		// The point of the notice: which of the two identities in front of the
+		// agent wins. Without this sentence it is just an announcement.
+		if !strings.Contains(out, "authoritative") {
+			t.Errorf("identity notice does not say the new identity wins:\n%s", out)
+		}
+		// It must not tell the agent the conversation is gone — that is the
+		// distinction from the continuity notices, and the whole reason this
+		// keeps the session instead of dropping it.
+		for _, forbidden := range []string{"could not be restored", "starting fresh", "does not continue it"} {
+			if strings.Contains(out, forbidden) {
+				t.Errorf("identity notice must not claim lost context (%q):\n%s", forbidden, out)
+			}
+		}
+	})
+
+	// A dropped resume already says the earlier turns are gone. Saying "your
+	// identity changed since the previous turn" on top of that contradicts it.
+	t.Run("suppressed when the resume itself was lost", func(t *testing.T) {
+		lost := resumed
+		lost.PriorSessionResumeUnavailable = true
+		out := BuildPrompt(lost, "claude", WithAgentIdentityChanged())
+		if strings.Contains(out, heading) {
+			t.Errorf("identity notice rendered alongside a lost-resume notice:\n%s", out)
+		}
+		if !strings.Contains(out, "## Session Continuity Notice") {
+			t.Errorf("continuity notice went missing:\n%s", out)
+		}
+	})
+}
