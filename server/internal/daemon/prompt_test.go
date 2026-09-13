@@ -2077,6 +2077,7 @@ func TestWorktreeReplayConflictBlock(t *testing.T) {
 // message, never in the runtime brief: it is true of one run and false of the
 // next on the same issue, and the brief is the cached prefix (MUL-5377).
 func TestBuildPromptAgentIdentityChangedNotice(t *testing.T) {
+	t.Parallel()
 	const heading = "## Agent Identity Notice"
 
 	resumed := Task{
@@ -2089,12 +2090,14 @@ func TestBuildPromptAgentIdentityChangedNotice(t *testing.T) {
 	}
 
 	t.Run("absent without the option", func(t *testing.T) {
+		t.Parallel()
 		if out := BuildPrompt(resumed, "claude"); strings.Contains(out, heading) {
 			t.Errorf("identity notice rendered on a turn that did not ask for it:\n%s", out)
 		}
 	})
 
 	t.Run("present with the option", func(t *testing.T) {
+		t.Parallel()
 		out := BuildPrompt(resumed, "claude", WithAgentIdentityChanged())
 		if !strings.Contains(out, heading) {
 			t.Fatalf("identity notice missing from the per-turn message:\n%s", out)
@@ -2119,6 +2122,7 @@ func TestBuildPromptAgentIdentityChangedNotice(t *testing.T) {
 	// identity ARE replayed here, so this is the case the notice exists for —
 	// gating it on PriorSessionResumeUnavailable would drop it exactly here.
 	t.Run("survives a flagged continuity gap that still resumes", func(t *testing.T) {
+		t.Parallel()
 		flagged := resumed
 		flagged.PriorSessionResumeUnavailable = true
 		out := BuildPrompt(flagged, "claude", WithAgentIdentityChanged())
@@ -2129,10 +2133,28 @@ func TestBuildPromptAgentIdentityChangedNotice(t *testing.T) {
 			t.Errorf("continuity notice went missing:\n%s", out)
 		}
 		// The two have to be able to stand together: one says some memory did
-		// not come back, the other says which instructions now win. The identity
-		// notice must not assert a history that may be gone.
-		if strings.Contains(out, "Those earlier turns are still an accurate record") {
-			t.Errorf("identity notice asserts a history the continuity notice says is gone:\n%s", out)
+		// not come back, the other says which instructions now win. So the
+		// identity notice's claim about earlier turns has to stay conditional —
+		// asserted as PRESENT, because the failure mode is an edit that drops
+		// the condition, and forbidding one particular unconditional phrasing
+		// would not catch a differently-worded one.
+		if !strings.Contains(out, "Where those earlier turns are still in front of you") {
+			t.Errorf("identity notice asserts a history the continuity notice may have just denied:\n%s", out)
+		}
+	})
+
+	// The cold-session retry in runTask clears PriorSessionID and rebuilds the
+	// prompt with the SAME options slice, so the option outlives the decision
+	// that set it. A turn that resumes nothing must not be told its identity
+	// changed "since the previous turn of this conversation".
+	t.Run("dropped by the cold retry that resumes nothing", func(t *testing.T) {
+		t.Parallel()
+		retried := resumed
+		retried.PriorSessionID = ""
+		retried.PriorSessionResumeUnavailable = true
+		out := BuildPrompt(retried, "claude", WithAgentIdentityChanged())
+		if strings.Contains(out, heading) {
+			t.Errorf("identity notice survived onto a turn with no prior session:\n%s", out)
 		}
 	})
 }

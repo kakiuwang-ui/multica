@@ -109,6 +109,7 @@ func writeBackgroundTaskSafetySlim(b *strings.Builder) {
 func writeAgentIdentity(b *strings.Builder, ctx TaskContextForEnv) {
 	if ctx.AgentName != "" || ctx.AgentID != "" {
 		b.WriteString("## Agent Identity\n\n")
+		b.WriteString(agentIdentityFingerprintLine(ctx))
 		if ctx.AgentName != "" {
 			fmt.Fprintf(b, "**You are: %s**", ctx.AgentName)
 			if ctx.AgentID != "" {
@@ -124,6 +125,7 @@ func writeAgentIdentity(b *strings.Builder, ctx TaskContextForEnv) {
 	}
 	if ctx.AgentInstructions != "" {
 		b.WriteString("## Agent Identity\n\n")
+		b.WriteString(agentIdentityFingerprintLine(ctx))
 		b.WriteString(ctx.AgentInstructions)
 		b.WriteString("\n\n")
 	}

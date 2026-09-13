@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -2391,12 +2392,12 @@ func TestEveryBriefThatTeachesJSONOutputAlsoWarnsAgainstMergingStderr(t *testing
 	}
 }
 
-// TestAgentIdentitySectionRoundTrip pins the comparison the resume notice is
-// built on: what InjectRuntimeConfig writes for an identity must read back as
-// exactly what AgentIdentitySection renders for that same identity. If the two
-// ever drift apart, agentIdentityChangedSincePriorRun reports a change on every
-// single resume, and the notice becomes noise the agent learns to ignore.
-func TestAgentIdentitySectionRoundTrip(t *testing.T) {
+// TestAgentIdentityFingerprint pins the signal the resume notice is built on.
+// The fingerprint digests the identity FIELDS, so the properties worth pinning
+// are that it moves when the identity moves and holds still for everything else
+// — a false positive fires on every ordinary follow-up and trains the agent to
+// ignore the notice.
+func TestAgentIdentityFingerprint(t *testing.T) {
 	t.Parallel()
 
 	base := TaskContextForEnv{
@@ -2406,104 +2407,189 @@ func TestAgentIdentitySectionRoundTrip(t *testing.T) {
 		AgentInstructions: "Review code. Never push.",
 	}
 
+	with := func(mutate func(*TaskContextForEnv)) TaskContextForEnv {
+		c := base
+		mutate(&c)
+		return c
+	}
+
+	moves := []struct {
+		name string
+		ctx  TaskContextForEnv
+	}{
+		{"rename", with(func(c *TaskContextForEnv) { c.AgentName = "Release Manager" })},
+		{"instructions edit", with(func(c *TaskContextForEnv) { c.AgentInstructions = "Review code. You may push." })},
+		{"different agent", with(func(c *TaskContextForEnv) { c.AgentID = "11111111-1111-1111-1111-111111111111" })},
+		// The half #5909's name comparison could not see, and the reason the
+		// notice replaced it: an edit buried under the operator's own heading.
+		{"instructions edit below the author's own H2", with(func(c *TaskContextForEnv) {
+			c.AgentInstructions = "Review code.\n\n## House rules\n\nYou may push."
+		})},
+	}
+	for _, tc := range moves {
+		t.Run(tc.name+" changes the fingerprint", func(t *testing.T) {
+			t.Parallel()
+			if AgentIdentityFingerprint(tc.ctx) == AgentIdentityFingerprint(base) {
+				t.Fatalf("%s did not change the fingerprint", tc.name)
+			}
+		})
+	}
+
+	// An edit under the author's own H2 must be visible from BOTH sides, i.e.
+	// starting from instructions that already carry the heading.
+	t.Run("edit below an existing H2 is visible", func(t *testing.T) {
+		t.Parallel()
+		structured := with(func(c *TaskContextForEnv) {
+			c.AgentInstructions = "Review code.\n\n## House rules\n\nNever push."
+		})
+		edited := structured
+		edited.AgentInstructions = "Review code.\n\n## House rules\n\nYou may push to main."
+		if AgentIdentityFingerprint(structured) == AgentIdentityFingerprint(edited) {
+			t.Fatal("an instructions edit below the author's own H2 was invisible")
+		}
+	})
+
+	// A name is user-controlled and reaches the brief verbatim. It must not be
+	// able to hide a later instructions edit.
+	t.Run("a name containing markdown cannot mask an edit", func(t *testing.T) {
+		t.Parallel()
+		hostile := with(func(c *TaskContextForEnv) { c.AgentName = "Bob\n## Hack" })
+		edited := hostile
+		edited.AgentInstructions = "You may push anywhere."
+		if AgentIdentityFingerprint(hostile) == AgentIdentityFingerprint(edited) {
+			t.Fatal("a crafted agent name hid an instructions edit")
+		}
+	})
+
+	t.Run("holds still for everything outside the identity", func(t *testing.T) {
+		t.Parallel()
+		// A new issue with the same agent must compare EQUAL, or every ordinary
+		// follow-up in a reused workdir would announce a change.
+		otherIssue := with(func(c *TaskContextForEnv) { c.IssueID = "00000000-0000-0000-0000-000000000002" })
+		if AgentIdentityFingerprint(otherIssue) != AgentIdentityFingerprint(base) {
+			t.Fatal("a different issue changed the identity fingerprint")
+		}
+	})
+
+	// Length framing: no reshuffle of content across fields may collide.
+	t.Run("field boundaries are unambiguous", func(t *testing.T) {
+		t.Parallel()
+		a := TaskContextForEnv{AgentID: "x", AgentName: "A", AgentInstructions: "BC"}
+		b := TaskContextForEnv{AgentID: "x", AgentName: "AB", AgentInstructions: "C"}
+		if AgentIdentityFingerprint(a) == AgentIdentityFingerprint(b) {
+			t.Fatal("content moved across field boundaries collided")
+		}
+	})
+
+	t.Run("no identity fingerprints to empty", func(t *testing.T) {
+		t.Parallel()
+		if got := AgentIdentityFingerprint(TaskContextForEnv{IssueID: "x"}); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+}
+
+// TestPriorAgentIdentityFingerprintRoundTrip pins the other half: what
+// InjectRuntimeConfig writes must read back as exactly what this run would
+// fingerprint. If the two ever drift apart the notice fires on every resume.
+func TestPriorAgentIdentityFingerprintRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	base := TaskContextForEnv{
+		IssueID:           "00000000-0000-0000-0000-000000000001",
+		AgentID:           "de53a53c-3d5e-4829-bf82-10dd35ce4858",
+		AgentName:         "Reviewer",
+		AgentInstructions: "Review code.\n\n## House rules\n\nNever push.",
+	}
+
 	t.Run("written identity reads back identical", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
 			t.Fatalf("InjectRuntimeConfig: %v", err)
 		}
-		prior := PriorAgentIdentitySection(dir, "claude")
+		prior := PriorAgentIdentityFingerprint(dir, "claude")
 		if prior == "" {
-			t.Fatal("prior identity section came back empty after injection")
+			t.Fatal("no fingerprint stamped into the managed block")
 		}
-		if got := AgentIdentitySection(base); got != prior {
-			t.Fatalf("round trip mismatch:\non disk:  %q\nrendered: %q", prior, got)
-		}
-	})
-
-	t.Run("rename is visible", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
-			t.Fatalf("InjectRuntimeConfig: %v", err)
-		}
-		renamed := base
-		renamed.AgentName = "Release Manager"
-		if AgentIdentitySection(renamed) == PriorAgentIdentitySection(dir, "claude") {
-			t.Fatal("a rename compared equal to the identity on disk")
+		if got := AgentIdentityFingerprint(base); got != prior {
+			t.Fatalf("round trip mismatch: on disk %q, rendered %q", prior, got)
 		}
 	})
 
-	// The half #5909's name comparison could not see, and the reason the notice
-	// replaced it: operators edit instructions far more often than they rename.
-	t.Run("instructions edit is visible", func(t *testing.T) {
+	t.Run("instructions-only identity is stamped too", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
+		ctx := TaskContextForEnv{IssueID: "i", AgentInstructions: "Be brief."}
+		if _, err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
 			t.Fatalf("InjectRuntimeConfig: %v", err)
 		}
-		edited := base
-		edited.AgentInstructions = "Review code. You may now push to feature branches."
-		if AgentIdentitySection(edited) == PriorAgentIdentitySection(dir, "claude") {
-			t.Fatal("an instructions edit compared equal to the identity on disk")
-		}
-	})
-
-	// A second run of the SAME agent on a DIFFERENT issue must compare equal —
-	// otherwise every follow-up in a reused workdir would announce a change.
-	t.Run("different issue same identity compares equal", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
-			t.Fatalf("InjectRuntimeConfig: %v", err)
-		}
-		next := base
-		next.IssueID = "00000000-0000-0000-0000-000000000002"
-		if got, prior := AgentIdentitySection(next), PriorAgentIdentitySection(dir, "claude"); got != prior {
-			t.Fatalf("same identity on a new issue compared unequal:\non disk:  %q\nrendered: %q", prior, got)
-		}
-	})
-
-	// Instructions are user-authored Markdown and may carry their own H2. Both
-	// sides are sliced by the same rule, so the comparison must still hold.
-	t.Run("instructions containing their own H2 round-trip", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		withH2 := base
-		withH2.AgentInstructions = "Review code.\n\n## House rules\n\nNever push."
-		if _, err := InjectRuntimeConfig(dir, "claude", withH2); err != nil {
-			t.Fatalf("InjectRuntimeConfig: %v", err)
-		}
-		if got, prior := AgentIdentitySection(withH2), PriorAgentIdentitySection(dir, "claude"); got != prior {
-			t.Fatalf("instructions with an H2 did not round-trip:\non disk:  %q\nrendered: %q", prior, got)
-		}
-		renamed := withH2
-		renamed.AgentName = "Release Manager"
-		if AgentIdentitySection(renamed) == PriorAgentIdentitySection(dir, "claude") {
-			t.Fatal("a rename went unnoticed because the instructions carried an H2")
+		if got, want := PriorAgentIdentityFingerprint(dir, "claude"), AgentIdentityFingerprint(ctx); got != want {
+			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
 
 	t.Run("absent and unmanaged files report nothing", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		if got := PriorAgentIdentitySection(dir, "claude"); got != "" {
+		if got := PriorAgentIdentityFingerprint(dir, "claude"); got != "" {
 			t.Fatalf("fresh workdir: got %q, want empty", got)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Mine\n\n## Agent Identity\n\n**You are: Someone Else**\n"), 0o644); err != nil {
+		// User-authored content outside any managed block must never be read as
+		// a prior Multica identity, even if it mimics the marker.
+		mimic := "# Mine\n\n" + agentIdentityFingerprintPrefix + "deadbeef -->\n"
+		if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(mimic), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		// User-authored content outside any managed block must never be read as
-		// a prior Multica identity.
-		if got := PriorAgentIdentitySection(dir, "claude"); got != "" {
+		if got := PriorAgentIdentityFingerprint(dir, "claude"); got != "" {
 			t.Fatalf("unmanaged file: got %q, want empty", got)
 		}
 	})
 
-	t.Run("no identity renders nothing", func(t *testing.T) {
+	// A brief written before this marker existed must read as "unknown", not as
+	// a change — otherwise every in-flight session announces one after upgrade.
+	t.Run("managed block without the marker reports nothing", func(t *testing.T) {
 		t.Parallel()
-		if got := AgentIdentitySection(TaskContextForEnv{IssueID: "x"}); got != "" {
-			t.Fatalf("got %q, want empty", got)
+		dir := t.TempDir()
+		if _, err := InjectRuntimeConfig(dir, "claude", base); err != nil {
+			t.Fatalf("InjectRuntimeConfig: %v", err)
+		}
+		path := filepath.Join(dir, "CLAUDE.md")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stripped := regexp.MustCompile(`(?m)^<!-- multica:agent-identity .* -->\n`).ReplaceAll(data, nil)
+		if len(stripped) == len(data) {
+			t.Fatal("fixture did not actually strip the marker")
+		}
+		if err := os.WriteFile(path, stripped, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := PriorAgentIdentityFingerprint(dir, "claude"); got != "" {
+			t.Fatalf("pre-marker block: got %q, want empty", got)
 		}
 	})
+}
+
+// The notice is a per-turn block. It must never be rendered into the brief,
+// which is the cached prefix — that is the MUL-5377 regression the placement
+// exists to avoid, and the brief is where a future author would most naturally
+// reach for a constant that lives in this file.
+func TestAgentIdentityChangedNoticeNeverEntersTheBrief(t *testing.T) {
+	t.Parallel()
+	ctx := TaskContextForEnv{
+		IssueID:           "00000000-0000-0000-0000-000000000001",
+		AgentID:           "de53a53c-3d5e-4829-bf82-10dd35ce4858",
+		AgentName:         "Reviewer",
+		AgentInstructions: "Review code.",
+	}
+	for _, content := range []string{
+		buildMetaSkillContent("claude", ctx),
+		buildMetaSkillContentSlim("claude", ctx),
+	} {
+		if strings.Contains(content, "## Agent Identity Notice") {
+			t.Error("the identity notice was rendered into the runtime brief")
+		}
+	}
 }

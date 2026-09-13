@@ -6715,22 +6715,31 @@ func sessionHomeReachable(provider string, env *execenv.Environment, envReused b
 // all. An unknown prior identity is not evidence of a change, and announcing
 // one that did not happen teaches the agent to distrust the notice.
 //
-// Known gap: local_directory and local-worktree runs excise the managed block
-// on the way out (see the CleanupRuntimeConfig defer in runTask) so Multica
-// leaves nothing behind in the user's own tree. Their next run therefore reads
-// no prior identity and stays silent even when the resume does carry one. That
-// cleanup is worth more than this notice, so the coverage is managed workspaces
-// only; closing the gap needs the identity recorded somewhere the cleanup does
-// not reach, which is a larger change than this one.
+// Three known gaps, all of the same shape — the signal lives in the workdir's
+// managed block, so wherever that block is absent the answer degrades to
+// "silent" rather than to a false alarm:
+//
+//   - local_directory and local-worktree runs excise the block on the way out
+//     (the CleanupRuntimeConfig defer in runTask) so Multica leaves nothing in
+//     the user's own tree. That cleanup is worth more than this notice.
+//   - pi-family resumes are gated on the session file alone, never on workdir
+//     equality, so one can resume into a workdir no prior run wrote to.
+//   - the fingerprint is overwritten by InjectRuntimeConfig moments after it is
+//     read, so a run that injects and then dies before the agent sees its turn
+//     consumes the change: the next run compares new against new and says
+//     nothing. Delivery is at-most-once.
+//
+// Closing any of them needs the prior identity recorded somewhere this run's own
+// injection does not own, which is a larger change than this one.
 func agentIdentityChangedSincePriorRun(task Task, taskCtx execenv.TaskContextForEnv, provider, workDir string, taskLog *slog.Logger) bool {
 	if task.PriorSessionID == "" {
 		return false
 	}
-	current := execenv.AgentIdentitySection(taskCtx)
+	current := execenv.AgentIdentityFingerprint(taskCtx)
 	if current == "" {
 		return false
 	}
-	prior := execenv.PriorAgentIdentitySection(workDir, provider)
+	prior := execenv.PriorAgentIdentityFingerprint(workDir, provider)
 	if prior == "" || prior == current {
 		return false
 	}

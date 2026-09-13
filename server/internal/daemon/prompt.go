@@ -73,11 +73,13 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 	// written under the previous identity ARE replayed — the exact case this
 	// notice exists for. Gating it on the flag would drop it there.
 	//
-	// The case where no conversation comes back needs no guard here: the daemon
-	// clears PriorSessionID when it drops a resume, and
-	// agentIdentityChangedSincePriorRun returns false without one, so the option
-	// is never set on a turn that replays nothing.
-	if opts.agentIdentityChanged {
+	// Gated on a live PriorSessionID rather than on the option alone, because
+	// the option outlives the decision that set it: the cold-session retry in
+	// runTask clears PriorSessionID and rebuilds the prompt with the SAME
+	// promptOptions slice. Without this the retry — which resumes nothing —
+	// would carry a notice about "the previous turn of this conversation"
+	// alongside a continuity notice saying that conversation is gone.
+	if opts.agentIdentityChanged && task.PriorSessionID != "" {
 		b.WriteString(execenv.AgentIdentityChangedNotice)
 	}
 	b.WriteString(execenv.BuildTaskInitiatorBlock(task.InitiatorType, task.InitiatorName, task.InitiatorEmail))

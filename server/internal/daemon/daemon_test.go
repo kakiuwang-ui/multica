@@ -6173,11 +6173,14 @@ func TestAgentIdentityChangedSincePriorRun(t *testing.T) {
 			want: false,
 		},
 		{
-			name:      "unknown current identity stays silent",
+			// Stripping an agent back to a bare ID is a real change, not a
+			// missing reading: the daemon copies name and instructions straight
+			// off the task payload, so both empty means both were removed.
+			name:      "identity stripped to a bare ID announces",
 			priorName: "Reviewer", priorInstr: "Review code.",
 			task:        resuming,
 			currentName: "", currentInstr: "",
-			want: false,
+			want: true,
 		},
 	}
 
@@ -6192,6 +6195,17 @@ func TestAgentIdentityChangedSincePriorRun(t *testing.T) {
 			}
 		})
 	}
+
+	// A task carrying no identity at all has nothing to compare. Absence of
+	// evidence must not be reported as a change.
+	t.Run("no identity at all stays silent", func(t *testing.T) {
+		t.Parallel()
+		dir := priorRun(t, "Reviewer", "Review code.")
+		bare := execenv.TaskContextForEnv{IssueID: "00000000-0000-0000-0000-000000000002"}
+		if agentIdentityChangedSincePriorRun(resuming, bare, "claude", dir, slog.Default()) {
+			t.Fatal("a task with no identity was reported as an identity change")
+		}
+	})
 
 	// A workdir no prior run ever wrote to carries no identity to compare
 	// against. Absence of evidence must not be reported as a change.

@@ -1,6 +1,8 @@
 package execenv
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -314,58 +316,64 @@ func locateMarkerBlock(content string) (start, end int, found bool) {
 	return start, end, true
 }
 
-// agentIdentityHeading opens the section writeAgentIdentity emits. Both the
-// on-disk copy and the freshly rendered one are sliced at this exact string, so
-// a change to the heading cannot make the two sides disagree.
-const agentIdentityHeading = "## Agent Identity"
+// agentIdentityFingerprintPrefix opens the inert marker line writeAgentIdentity
+// stamps into the managed block, and is matched as a whole line so an inline
+// mention of it in user-authored text cannot be read as the real one.
+const agentIdentityFingerprintPrefix = "<!-- multica:agent-identity "
 
-// sliceAgentIdentitySection returns the "## Agent Identity" section of a brief
-// body, from its heading up to the next Markdown H2, or "" when the body has no
-// such section.
+// AgentIdentityFingerprint digests the identity FIELDS — not the Markdown they
+// render into — so a resumed run can tell whether the agent it is continuing as
+// is the one the previous run described (#5736, #5909).
 //
-// This is deliberately the ONLY place either side of the identity comparison is
-// cut, because the agent's instructions are user-authored and may themselves
-// contain an H2. Such a heading truncates this slice early — but it truncates
-// BOTH sides at the same place, so the comparison stays sound; what it costs is
-// reach, not correctness. An instructions edit entirely below the author's own
-// first H2 compares equal and goes unannounced, which is the honest trade for
-// not trying to parse user Markdown.
-func sliceAgentIdentitySection(body string) string {
-	start := strings.Index(body, agentIdentityHeading)
-	if start < 0 {
+// Fingerprinting the source rather than comparing the rendered section is what
+// makes this robust in the three ways that matter:
+//
+//   - Agent instructions are user-authored Markdown and routinely contain their
+//     own headings. Any comparison that parses the rendered brief has to decide
+//     where the section ends, and every such rule is defeated by an instructions
+//     body that contains that delimiter — which silently hides exactly the edits
+//     this is here to notice.
+//   - The agent's name is user-controlled and reaches the brief verbatim, so it
+//     can contain the delimiter too.
+//   - Rendering changes between daemon versions. A digest over the fields is
+//     unchanged by an edit to the section's layout, so upgrading the daemon does
+//     not announce an identity change to every in-flight session.
+//
+// Fields are length-framed so that no reshuffling of content between them can
+// produce a collision (a rename to "A" with instructions "BC" must not digest
+// the same as "AB" with "C").
+func AgentIdentityFingerprint(ctx TaskContextForEnv) string {
+	if ctx.AgentID == "" && ctx.AgentName == "" && ctx.AgentInstructions == "" {
 		return ""
 	}
-	rest := body[start+len(agentIdentityHeading):]
-	if next := strings.Index(rest, "\n## "); next >= 0 {
-		rest = rest[:next]
+	h := sha256.New()
+	for _, field := range []string{ctx.AgentID, ctx.AgentName, ctx.AgentInstructions} {
+		fmt.Fprintf(h, "%d:", len(field))
+		h.Write([]byte(field))
 	}
-	// A heading with nothing under it records no identity — writeAgentIdentity
-	// emits exactly that for a task carrying an AgentID but neither a name nor
-	// instructions. Normalising it to "" on BOTH sides is what stops an unknown
-	// identity being compared against a known one and reported as a change.
-	if strings.TrimSpace(rest) == "" {
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// agentIdentityFingerprintLine renders the marker writeAgentIdentity stamps into
+// the managed block. An HTML comment for the same reason the block's own markers
+// are one: inert in every Markdown renderer, and harmless when the file is fed
+// to the agent as instructions.
+func agentIdentityFingerprintLine(ctx TaskContextForEnv) string {
+	fp := AgentIdentityFingerprint(ctx)
+	if fp == "" {
 		return ""
 	}
-	return strings.TrimSpace(agentIdentityHeading + rest)
+	return agentIdentityFingerprintPrefix + fp + " -->\n\n"
 }
 
-// AgentIdentitySection renders the Agent Identity section this task context
-// would produce, normalized for comparison against the one already on disk.
-// Returns "" when the context carries no identity at all.
-func AgentIdentitySection(ctx TaskContextForEnv) string {
-	var b strings.Builder
-	writeAgentIdentity(&b, ctx)
-	return sliceAgentIdentitySection(b.String())
-}
-
-// PriorAgentIdentitySection reads the Agent Identity section recorded in the
-// Multica-managed block of the runtime config file a previous run left in
-// workDir. Returns "" when the file is absent, carries no managed block, or the
-// block predates the identity section.
+// PriorAgentIdentityFingerprint reads the identity fingerprint a previous run
+// stamped into the managed block in workDir. Returns "" when the file is absent,
+// carries no managed block, or the block was written before this marker existed
+// — none of which is evidence of a change.
 //
 // Must be called BEFORE InjectRuntimeConfig, which overwrites the block with
-// this run's identity. Reading it afterwards always reports "unchanged".
-func PriorAgentIdentitySection(workDir, provider string) string {
+// this run's fingerprint. Reading it afterwards always reports "unchanged".
+func PriorAgentIdentityFingerprint(workDir, provider string) string {
 	path := runtimeConfigPath(workDir, provider)
 	if path == "" {
 		return ""
@@ -374,11 +382,23 @@ func PriorAgentIdentitySection(workDir, provider string) string {
 	if err != nil {
 		return ""
 	}
-	start, end, ok := locateMarkerBlock(string(data))
+	content := string(data)
+	start, end, ok := locateMarkerBlock(content)
 	if !ok {
 		return ""
 	}
-	return sliceAgentIdentitySection(string(data)[start:end])
+	for _, line := range strings.Split(content[start:end], "\n") {
+		rest, found := strings.CutPrefix(strings.TrimSpace(line), agentIdentityFingerprintPrefix)
+		if !found {
+			continue
+		}
+		fp, closed := strings.CutSuffix(rest, " -->")
+		if !closed {
+			continue
+		}
+		return strings.TrimSpace(fp)
+	}
+	return ""
 }
 
 // CleanupRuntimeConfig excises the Multica marker block from the runtime
